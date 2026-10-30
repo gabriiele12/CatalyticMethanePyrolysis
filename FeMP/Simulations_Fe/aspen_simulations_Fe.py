@@ -66,14 +66,14 @@ def initialize_simulation(sim_config):
     path = Path().resolve()
     file_paths = {
         'PFR': {
-            'electric': fr'{path}\aspen_plus\Fe_Catalyst\pfr-electric-Fe.apw',
+            'electric': fr'{path}\aspen_plus\Fe_Catalyst_cp\pfr-electric-Fe.apw',
             'ch4': fr'{path}\aspen_plus\Fe_Catalyst\pfr-ch4-Fe.apw',
-            'h2': fr'{path}\aspen_plus\Fe_Catalyst\pfr-h2-Fe.apw'
+            'h2': fr'{path}\aspen_plus\Fe_Catalyst_cp\pfr-h2-Fe.apw'
         },
         'CSTR': {
-            'electric': fr'{path}\aspen_plus\Fe_Catalyst\cstr-electric-Fe.apw',
+            'electric': fr'{path}\aspen_plus\Fe_Catalyst_cp\cstr-electric-Fe.apw',
             'ch4': fr'{path}\aspen_plus\Fe_Catalyst\cstr-ch4-Fe.apw',
-            'h2': fr'{path}\aspen_plus\Fe_Catalyst\cstr-h2-Fe.apw'
+            'h2': fr'{path}\aspen_plus\Fe_Catalyst_cp\cstr-h2-Fe.apw'
         }
     }
 
@@ -176,7 +176,7 @@ def get_temp_values(reactor_temp, reactor_type):
 
     pfr_ranges = [
         (700, 40, 80, 270),
-        (725, 50, 75, 315),
+        (725, 50, 80, 315),
         (750, 55, 75, 355),
         (775, 60, 75, 400),
         (800, 60, 75, 445),
@@ -264,10 +264,10 @@ def reactor_size(sim_config, solid_c_wt):
         actual_vol = pi * (dia / 2) ** 2 * height
         cross_area = pi * (dia / 2) ** 2
         p_drop = (cat_wt + solid_c_wt) * 9.8067 * 1e-5 * (4/3) / cross_area
-        punishment1 = 1000 if actual_vol < min_vol else 1
-        punishment2 = 1000 if aspect_ratio < 2.5 else 1
+        punishment1 = 1000 if actual_vol < min_vol else 0
+        punishment2 = 1000 if aspect_ratio < 2.5 else 0
         return (abs((sim_config['comp1_pressure'] - p_drop - sim_config['reactor']['pressure']))
-                * punishment1 * punishment2)
+                + punishment1 + punishment2)
 
     num_units = 1
 
@@ -401,6 +401,8 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
 
     # Initialize error parameters for the iterative process
     error, max_iterations, iteration = 10, 20, 0
+    Fch4_total = Fch4_in
+    Fh2_total = Fh2_in
 
     # Iteratively run simulations until convergence or maximum iterations reached
     while error > 0.001 and iteration < max_iterations:
@@ -423,9 +425,9 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
         Fh2_out_unit = Fh2_out / num_reacs
         cat_wt_unit = sim_config['catalyst']['weight'] / num_reacs
 
-        # Calculate the error between old and new flow rates
-        error = max(abs((Fch4_unit - Fch4_unit_new) / Fch4_unit),
-                    abs((Fh2_unit - Fh2_unit_new) / Fh2_unit))
+        # Calculate the error between old and new total flow rates
+        error = max(abs((Fch4_total - Fch4) / Fch4_total),
+                    abs((Fh2_total - Fh2) / Fh2_total))
         if sim_config['mode']['type'] == 'constant_rate':
             print(fr"Iteration {iteration}: Error = {error*100:.4g}%, Deactivation Factor = {deactivation:.4g}")
         elif sim_config['mode']['type'] == 'constant_da':
@@ -433,6 +435,7 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
         print(f"Number of reactors: {num_reacs}, Volume per reactor = {reac_vol_unit:.4g}, "
               f"Reactor pressure = {(sim_config['comp1_pressure'] - p_drop):.4g}")
 
+        Fch4_total, Fh2_total = Fch4, Fh2
         Fch4_unit, Fh2_unit = Fch4_unit_new, Fh2_unit_new
 
         if error < 0.001:
@@ -523,13 +526,13 @@ def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, 
                                                              r'Streams\CLEANGAS\Output\MASSFLOW\MIXED\CO2')
                 cw_tot += (find_node(aspen, r'Blocks\COOLER-4\Output\HX_DUTY') +
                            find_node(aspen, r'Blocks\COMP-4\Output\DUTY_OUT') * -1)
-                arrays['Cool Water Total [kJ/s]'][0] = cw_tot  # kg/h
+                arrays['Cool Water Total [kJ/s]'][0] = cw_tot  # kJ/s
             else:
                 arrays['Comp-4 Power [kW]'][0] = 0
                 arrays['Cool Water 4 [kJ/s]'][0] = 0
                 arrays['Cooler-4 Area [m2]'][0] = 0
                 arrays['CO2 with CCS [kg/h]'][0] = 0
-                arrays['Cool Water Total [kJ/s]'][0] = cw_tot  # kg/h
+                arrays['Cool Water Total [kJ/s]'][0] = cw_tot  # kJ/s
         else:
             arrays['Comp-3 Power [kW]'][0] = 0
             arrays['Comp-3 Vol. Flow [m3/h]'][0] = 0

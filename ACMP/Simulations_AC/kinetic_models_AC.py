@@ -164,7 +164,9 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
             times.append(dt + tau / 20)
             dt += tau / 10
 
-        return np.array(fractions), np.array(times)
+        fractions = np.array(fractions)
+        fractions /= np.sum(fractions)
+        return fractions, np.array(times)
 
     def reactor_equations(flows, tres, equilibrium_factor):
         Fch4_out, Fh2_out = flows
@@ -193,6 +195,58 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
             initial_flows = previous_flows.copy()
 
         result = minimize(reactor_equations, x0=initial_flows, args=(tres, equilibrium_factor), bounds=[(1e-11, 1e6), (1e-11, 1e6)])
+
+        # Fallback only if the standard solve does not satisfy the balances.
+        if not result.success or result.fun > 1e-8:
+            print(
+                f"WARNING: CSTR solver convergence issue | "
+                f"success={result.success}, objective={result.fun:.3e}. "
+                f"Trying alternative initial guesses."
+            )
+
+            fallback_guesses = []
+            for X_guess in (0.50, 0.80, 0.95):
+                fallback_guesses.append(
+                    np.array([
+                        Fch4_reactor_in * (1 - X_guess),
+                        Fh2_reactor_in + 2 * Fch4_reactor_in * X_guess
+                    ])
+                )
+
+            if equilibrium_enabled and X_eq is not None:
+                X_guess = min(max(X_eq, 0.0), 0.999999)
+                fallback_guesses.append(
+                    np.array([
+                        Fch4_reactor_in * (1 - X_guess),
+                        Fh2_reactor_in + 2 * Fch4_reactor_in * X_guess
+                    ])
+                )
+
+            best_result = result
+
+            for fallback_guess in fallback_guesses:
+                fallback_result = minimize(
+                    reactor_equations,
+                    x0=fallback_guess,
+                    args=(tres, equilibrium_factor),
+                    bounds=[(1e-11, 1e6), (1e-11, 1e6)]
+                )
+
+                if fallback_result.fun < best_result.fun:
+                    best_result = fallback_result
+
+                if fallback_result.success and fallback_result.fun <= 1e-8:
+                    best_result = fallback_result
+                    break
+
+            result = best_result
+
+            if not result.success or result.fun > 1e-8:
+                raise RuntimeError(
+                    f"CSTR flow solver failed after fallback guesses: "
+                    f"success={result.success}, objective={result.fun:.3e}, "
+                    f"CatRate={cat_rate:.6f} kg/s, feq={equilibrium_factor:.6f}"
+                )
 
         Fch4_out, Fh2_out = result.x
         previous_flows = result.x.copy()
@@ -223,7 +277,8 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
     X_eq = None
 
     if equilibrium_enabled:
-        total_pressure = sim_config['reactor']['pressure'] * 1e5
+
+        total_pressure = press
         X_eq = calculate_equilibrium_conversion(T=temp, total_pressure=total_pressure, Fch4_in=Fch4_reactor_in, Fh2_in=Fh2_reactor_in, equilibrium_settings=equilibrium_settings)
 
     equilibrium_factor = float(np.clip(equilibrium_factor_guess, 1e-8, 1.0))
@@ -238,9 +293,9 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
 
             if not equilibrium_enabled:
                 conversion_converged = True
-            elif results['conversion'] > X_eq:  #elif results['conversion'] > X_eq + conversion_tolerance:
+            elif results['conversion'] > X_eq + conversion_tolerance:
                 conversion_converged = False
-            elif results['conversion'] >= X_eq - conversion_tolerance:  #abs(results['conversion'] - X_eq) <= conversion_tolerance:
+            elif abs(results['conversion'] - X_eq) <= conversion_tolerance:
                 conversion_converged = True
             elif equilibrium_factor >= 1.0 - 1e-10:
                 conversion_converged = True
@@ -252,7 +307,7 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
             if conversion_converged:
                 break
 
-            damping = 0.25
+            damping = 0.5
             ratio = X_eq / max(results['conversion'], 1e-12)
             equilibrium_factor = float(np.clip(equilibrium_factor * ratio**damping, 1e-8, 1.0))
 
@@ -262,8 +317,8 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
     # Constant average activity
     elif mode_type == 'constant_da':
         equilibrium_factor = float(np.clip(equilibrium_factor_guess, 1e-8, 1.0))
-        max_equilibrium_iterations = 350  #250
-        equilibrium_damping = 0.5  #0.5
+        max_equilibrium_iterations = 350
+        equilibrium_damping = 0.5
 
         for equilibrium_iteration in range(max_equilibrium_iterations):
             previous_flows = None
@@ -338,48 +393,6 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
     else:
         raise ValueError(f"Unsupported mode type: {mode_type}")
 
-    # Validating the final CSTR solution using multiple initial guesses
-    print("\nCSTR VALIDATION")
-
-    cat_rate_test = cat_rate
-    equilibrium_factor_test = equilibrium_factor
-    tres_test = residenceTime(cat_wt, cat_rate_test)
-
-    initial_guesses = []
-    initial_guesses.append(np.array([Fch4_reactor_in, Fh2_reactor_in]))
-
-    X_guess = 0.50
-    initial_guesses.append(np.array([Fch4_reactor_in * (1 - X_guess), Fh2_reactor_in + 2 * Fch4_reactor_in * X_guess]))
-
-    X_guess = 0.80
-    initial_guesses.append(np.array([Fch4_reactor_in * (1 - X_guess), Fh2_reactor_in + 2 * Fch4_reactor_in * X_guess]))
-
-    X_guess = 0.95
-    initial_guesses.append(np.array([Fch4_reactor_in * (1 - X_guess), Fh2_reactor_in + 2 * Fch4_reactor_in * X_guess]))
-
-    if equilibrium_enabled:
-        X_guess = min(X_eq, 0.999999)
-        initial_guesses.append(np.array([Fch4_reactor_in * (1 - X_guess), Fh2_reactor_in + 2 * Fch4_reactor_in * X_guess]))
-
-    for i, initial_flows in enumerate(initial_guesses, start=1):
-        result_test = minimize(reactor_equations, x0=initial_flows, args=(tres_test, equilibrium_factor_test), bounds=[(1e-11, 1e6), (1e-11, 1e6)])
-
-        Fch4_out_test, Fh2_out_test = result_test.x
-        Ftot_test = Fch4_out_test + Fh2_out_test
-        Pch4_test = Fch4_out_test * press / Ftot_test
-
-        particle_fractions_test, time_in_reactor_test = RTD(tres_test)
-        average_a_test = float(np.sum(deactivation(temp, Pch4_test, time_in_reactor_test, da_constants) * particle_fractions_test))
-        r0_test = initial_reaction_rate(temp, Pch4_test, r_constants, equilibrium_factor_test)
-        r_test = r0_test * average_a_test
-
-        R_ch4_test = Fch4_reactor_in - Fch4_out_test - r_test * cat_wt * 1000
-        R_h2_test = Fh2_reactor_in - Fh2_out_test + 2 * r_test * cat_wt * 1000
-        objective_test = R_ch4_test ** 2 + R_h2_test ** 2
-        conversion_test = (Fch4_reactor_in - Fch4_out_test) / Fch4_reactor_in
-
-        print(f"Guess {i}: " f"X={conversion_test:.6f} | " f"DA={average_a_test:.6f} | " f"Fch4_out={Fch4_out_test:.6f} | " f"Fh2_out={Fh2_out_test:.6f} | " f"R_CH4={R_ch4_test:.6e} | " f"R_H2={R_h2_test:.6e} | " f"Objective={objective_test:.6e} | " f"success={result_test.success}")
-
     Fch4_out = results['Fch4_out']
     Fh2_out = results['Fh2_out']
     Fc_out = results['Fc_out']
@@ -419,7 +432,6 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
     }
 
 
-# PFR model: coupled loops
 def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=501, verbose=False, equilibrium_factor_guess=1.0):
     temp = sim_config['reactor']['temperature']
     press_in = sim_config['comp1_pressure'] * 1e5
@@ -437,7 +449,6 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
 
     equilibrium_settings = sim_config.get('equilibrium', {})
     equilibrium_enabled = equilibrium_settings.get('enabled', False)
-    conversion_tolerance = equilibrium_settings.get('conversion_tolerance', 1e-3)
 
     def update_deactivation(Pch4, a_prev, dt, initial=False):
         if initial:
@@ -448,19 +459,19 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
 
         return float(np.clip(a, 0, 1))
 
-    def reactor_equations(flows, Fch4_seg_in, Fh2_seg_in, local_press, dt, a_prev, i, equilibrium_factor):
+    def reactor_equations(flows, Fch4_seg_in, Fh2_seg_in, local_press, dt, a_prev, i):
         Fch4_seg_out, Fh2_seg_out = flows
         Ftot = Fch4_seg_out + Fh2_seg_out
         Pch4 = Fch4_seg_out * local_press / Ftot
         a_local = update_deactivation(Pch4, a_prev, dt, initial=(i == 0))
-        r = initial_reaction_rate(temp, Pch4, r_constants, equilibrium_factor) * a_local
+        r = initial_reaction_rate(temp, Pch4, r_constants) * a_local
 
         R_ch4 = Fch4_seg_in - Fch4_seg_out - r * cat_wt * 1000 / n
         R_h2 = Fh2_seg_in - Fh2_seg_out + 2 * r * cat_wt * 1000 / n
 
         return R_ch4**2 + R_h2**2
 
-    def simulate(cat_rate, equilibrium_factor):
+    def simulate(cat_rate):
         tres = residenceTime(cat_wt, cat_rate)
         dt = tres / n
         a = np.zeros(n)
@@ -478,14 +489,51 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
         Pch4 = None
         Ph2 = None
 
+        capped_segments = 0
+        first_capped_segment = None
+
         for i in range(n):
             init_value = np.array([Fch4_seg_in, Fh2_seg_in])
             max_ch4 = max(Fch4_seg_in * 1.05, 1.0)
             max_h2 = max(Fh2_seg_in + 2 * Fch4_seg_in * 1.05, 1.0)
 
-            result = minimize(reactor_equations, x0=init_value, args=(Fch4_seg_in, Fh2_seg_in, local_press, dt, a_prev, i, equilibrium_factor), bounds=[(1e-11, max_ch4), (1e-11, max_h2)])
+            result = minimize(
+                reactor_equations,
+                x0=init_value,
+                args=(Fch4_seg_in, Fh2_seg_in, local_press, dt, a_prev, i),
+                bounds=[(1e-11, max_ch4), (1e-11, max_h2)]
+            )
+
+            if not result.success or result.fun > 1e-8:
+                print(
+                    f"Convergence check at segment {i} | "
+                    f"success={result.success}, objective={result.fun:.3e}"
+                )
 
             Fch4_out, Fh2_out = result.x
+
+
+            if equilibrium_enabled:
+                X_eq_local = calculate_equilibrium_conversion(
+                    T=temp,
+                    total_pressure=local_press,
+                    Fch4_in=Fch4_seg_in,
+                    Fh2_in=Fh2_seg_in,
+                    equilibrium_settings=equilibrium_settings
+                )
+
+                X_kin_local = (Fch4_seg_in - Fch4_out) / max(Fch4_seg_in, 1e-12)
+
+                if X_kin_local > X_eq_local:
+                    reacted_ch4 = Fch4_seg_in * X_eq_local
+                    Fch4_out = Fch4_seg_in - reacted_ch4
+                    Fh2_out = Fh2_seg_in + 2 * reacted_ch4
+                    capped_segments += 1
+
+                    if first_capped_segment is None:
+                        first_capped_segment = i
+
+
             Ftot = Fch4_out + Fh2_out
             Pch4 = Fch4_out * local_press / Ftot
             Ph2 = local_press - Pch4
@@ -493,8 +541,9 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
             a[i] = update_deactivation(Pch4, a_prev, dt, initial=(i == 0))
             a_prev = a[i]
 
-            r = initial_reaction_rate(temp, Pch4, r_constants, equilibrium_factor) * a[i]
-            Fc_out = Fc_in + r * cat_wt * 1000 / n
+
+            reacted_ch4 = max(Fch4_seg_in - Fch4_out, 0.0)
+            Fc_out = Fc_in + reacted_ch4
 
             Fch4_seg_in = Fch4_out
             Fh2_seg_in = Fh2_out
@@ -502,7 +551,10 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
             local_press -= p_drop * 1e5 / n
 
             if verbose and i % 100 == 0:
-                print(f"[PFR segment {i}/{n}] a={a[i]:.4f} | " f"Pch4={Pch4 / 1e5:.4f} bar | Ph2={Ph2 / 1e5:.4f} bar")
+                print(
+                    f"[PFR segment {i}/{n}] a={a[i]:.4f} | "
+                    f"Pch4={Pch4 / 1e5:.4f} bar | Ph2={Ph2 / 1e5:.4f} bar"
+                )
 
         average_a = float(np.average(a))
         conversion = (Fch4_reactor_in - Fch4_out) / Fch4_reactor_in
@@ -516,92 +568,58 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
             "average_a": average_a,
             "cat_rate": cat_rate,
             "tres": tres,
-            "conversion": conversion
+            "conversion": conversion,
+            "capped_segments": capped_segments,
+            "first_capped_segment": first_capped_segment
         }
 
     X_eq = None
 
     if equilibrium_enabled:
-        total_pressure = sim_config['reactor']['pressure'] * 1e5
-        X_eq = calculate_equilibrium_conversion(T=temp, total_pressure=total_pressure, Fch4_in=Fch4_reactor_in, Fh2_in=Fh2_reactor_in, equilibrium_settings=equilibrium_settings)
-
-    equilibrium_factor = float(np.clip(equilibrium_factor_guess, 1e-8, 1.0))
+        # Local equilibrium caps inside simulate() use the pressure of each PFR
+        # segment. This overall X_eq is only a diagnostic reference and is
+        # evaluated at the actual reactor outlet pressure, not the target pressure.
+        outlet_pressure = max(press_in - p_drop * 1e5, 1e-12)
+        X_eq = calculate_equilibrium_conversion(
+            T=temp,
+            total_pressure=outlet_pressure,
+            Fch4_in=Fch4_reactor_in,
+            Fh2_in=Fh2_reactor_in,
+            equilibrium_settings=equilibrium_settings
+        )
 
     if mode_type == 'constant_rate':
         cat_rate = mode_value
-        max_joint_iterations = 150
-
-        for iteration in range(max_joint_iterations):
-            results = simulate(cat_rate, equilibrium_factor)
-
-            if not equilibrium_enabled:
-                conversion_converged = True
-            elif results['conversion'] > X_eq + conversion_tolerance:
-                conversion_converged = False
-            elif abs(results['conversion'] - X_eq) <= conversion_tolerance:
-                conversion_converged = True
-            elif equilibrium_factor >= 1.0 - 1e-10:
-                conversion_converged = True
-            else:
-                conversion_converged = False
-
-            if conversion_converged:
-                break
-
-            damping = 0.25
-            ratio = X_eq / max(results['conversion'], 1e-12)
-            equilibrium_factor = float(np.clip(equilibrium_factor * ratio**damping, 1e-8, 1.0))
-
-        else:
-            raise RuntimeError(f"The PFR equilibrium iteration did not converge after {max_joint_iterations} iterations.")
+        results = simulate(cat_rate)
 
     elif mode_type == 'constant_da':
         cat_rate = init_guess
-        max_joint_iterations = 450
+        max_iterations = 450
 
-        for iteration in range(max_joint_iterations):
-            results = simulate(cat_rate, equilibrium_factor)
+        for iteration in range(max_iterations):
+            results = simulate(cat_rate)
             activity_error = results['average_a'] - mode_value
 
-            if equilibrium_enabled:
-                conversion_error = results['conversion'] - X_eq
-            else:
-                conversion_error = 0.0
+            print(
+                f"PFR iteration {iteration}: DA={results['average_a']:.5f} "
+                f"(target={mode_value:.5f}) | CatRate={cat_rate:.5f} kg/s | "
+                f"X={results['conversion']:.5f}" +
+                (f" | Xeq={X_eq:.5f} | capped={results['capped_segments']}" if equilibrium_enabled else "")
+            )
 
-            print(f"PFR iteration {iteration}: DA={results['average_a']:.5f} " f"(target={mode_value:.5f}) | CatRate={cat_rate:.5f} kg/s | " f"X={results['conversion']:.5f}" + (f" | Xeq={X_eq:.5f} | feq={equilibrium_factor:.6f}" if equilibrium_enabled else ""))
-
-            activity_converged = abs(activity_error) <= activity_tolerance
-
-            if not equilibrium_enabled:
-                conversion_converged = True
-            elif results['conversion'] > X_eq + conversion_tolerance:
-                conversion_converged = False
-            elif abs(results['conversion'] - X_eq) <= conversion_tolerance:
-                conversion_converged = True
-            elif equilibrium_factor >= 1.0 - 1e-10:
-                conversion_converged = True
-            else:
-                conversion_converged = False
-
-            if activity_converged and conversion_converged:
+            if abs(activity_error) <= activity_tolerance:
                 break
 
-            if not activity_converged:
-                if results['average_a'] > mode_value:
-                    cat_rate -= abs(activity_error) * init_guess * step_size
-                else:
-                    cat_rate += abs(activity_error) * init_guess * step_size
+            if results['average_a'] > mode_value:
+                cat_rate -= abs(activity_error) * init_guess * step_size
+            else:
+                cat_rate += abs(activity_error) * init_guess * step_size
 
-                if cat_rate <= 0:
-                    raise RuntimeError("Catalyst rate has reached 0.")
-
-            if equilibrium_enabled and not conversion_converged:
-                damping = 0.75 #0.25
-                ratio = X_eq / max(results['conversion'], 1e-12)
-                equilibrium_factor = float(np.clip(equilibrium_factor * ratio**damping, 1e-8, 1.0))
+            if cat_rate <= 0:
+                raise RuntimeError("Catalyst rate has reached 0.")
 
         else:
-            raise RuntimeError(f"The coupled PFR activity/equilibrium iteration did not converge after {max_joint_iterations} iterations.")
+            raise RuntimeError(f"The PFR activity iteration did not converge after {max_iterations} iterations.")
 
     else:
         raise ValueError(f"Unsupported mode type: {mode_type}")
@@ -627,8 +645,10 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
     print(f"Residence time        = {tres:.3f} s")
 
     if equilibrium_enabled:
-        print(f"CH4 equilibrium conversion = {X_eq:.6f}")
-        print(f"Equilibrium factor         = {equilibrium_factor:.8f}")
+        print(f"CH4 equilibrium conversion at outlet pressure = {X_eq:.6f}")
+        print(f"Locally capped segments    = {results['capped_segments']}/{n}")
+        if results['first_capped_segment'] is not None:
+            print(f"First capped segment       = {results['first_capped_segment']}")
         print(f"Equilibrium error          = {(X_python - X_eq) * 100:.6f} percentage points")
 
     return {
@@ -640,6 +660,10 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
         "average_a": average_a,
         "cat_rate": cat_rate,
         "tres": tres,
-        "equilibrium_factor": equilibrium_factor,
-        "equilibrium_conversion": X_eq
+        "conversion": X_python,
+        "equilibrium_factor": 1.0,
+        "equilibrium_conversion": X_eq,
+        "capped_segments": results['capped_segments'],
+        "first_capped_segment": results['first_capped_segment']
     }
+

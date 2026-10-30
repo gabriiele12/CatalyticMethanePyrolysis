@@ -1,4 +1,3 @@
-import time
 import warnings
 import math
 import numpy as np
@@ -23,18 +22,14 @@ def Arrhenius(A, E, T, T_reference):
 
 def reaction_adsorption_constant(T, r_constants):
     """
-    Calculate reaction and adsorption constants from temperature.
+    Calculate the temperature-dependent reaction rate constant and equilibrium constant.
 
     Parameters:
         T (float): Temperature in Celsius.
-        r_constants (dict): Contains pre-exponential factors and activation energies for:
-            - 'k': reaction rate constant
-            - 'K_p': equilibrium constant
-            - 'K_ch4': CH₄ adsorption constant
-            - 'K_h2': H₂ adsorption constant
+        r_constants (dict): Contains the pre-exponential factor, activation energy, and reference temperature for 'k'.
 
     Returns:
-        tuple: (k, Kp, k_ch4, k_h2)
+        tuple: (k, Keq), where k is the reaction rate constant and Keq is the dimensionless equilibrium constant.
     """
     T_k = T + 273.15  # Convert to Kelvin
     A, E, T_ref = r_constants["k"]
@@ -119,16 +114,16 @@ def RK4constants(T, Pch4, Ph2, a_prev, r_constants, da_constants, dt):
 
 def initial_reaction_rate(T, Pch4, Ph2, r_constants):
     """
-    Compute initial reaction rate based on Langmuir-Hinshelwood kinetics.
+    Compute the initial methane-pyrolysis rate using the reversible first-order kinetic expression.
 
     Parameters:
         T (float): Temperature in Celsius.
         Pch4 (float): Partial pressure of CH₄ (Pa).
         Ph2 (float): Partial pressure of H₂ (Pa).
-        r_constants (dict): Reaction and adsorption constants.
+        r_constants (dict): Reaction-rate parameters used to calculate k and Keq.
 
     Returns:
-        float: Initial reaction rate (mol/kg·s).
+        float: Initial reaction rate (kmol/(kg_cat·s)).
     """
     k, Keq = reaction_adsorption_constant(T, r_constants)
     n = 2
@@ -208,7 +203,9 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
             times.append(dt + (tau / 10) - (tau / 20))
             dt += tau / 10
 
-        return np.array(fractions), np.array(times)
+        fractions = np.array(fractions)
+        fractions /= np.sum(fractions)
+        return fractions, np.array(times)
 
     def reactor_equations(flows, Fch4_in, Fh2_in, temp, press, r_constants, da_constants, cat_wt, tres):
         """
@@ -251,6 +248,12 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
                           x0=init_value,
                           bounds=[(1e-11, 1e6), (1e-11, 1e6)])
 
+        if not result.success or result.fun > 1e-8:
+            print(
+                f"WARNING: CSTR solver convergence issue | "
+                f"success={result.success}, objective={result.fun:.3e}"
+            )
+
         Fch4_out, Fh2_out = result.x
         Ftot = Fch4_out + Fh2_out
         Pch4 = Fch4_out * press / Ftot
@@ -269,6 +272,7 @@ def isothermal_cstr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, ver
 
     # Mode: constant catalyst rate
     if mode_type == 'constant_rate':
+        cat_rate = mode_value
         Fch4_out, Fh2_out, Fc_out, Pch4, Ph2, average_a, tres = simulate(mode_value, Fch4_in, Fh2_in, temp,
                                                                                    press, r_constants, da_constants)
 
@@ -432,15 +436,33 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
                               x0=init_value,
                               args=(Fch4_in, Fh2_in, temp, press, r_constants, da_constants, cat_wt, n, dt, a_prev, i),
                               bounds=[(1e-11, 100000), (1e-11, 100000)])
+
+            if not result.success or result.fun > 1e-8:
+                print(
+                    f"WARNING: PFR solver convergence issue at segment {i} | "
+                    f"success={result.success}, objective={result.fun:.3e}"
+                )
+
             Fch4_out, Fh2_out = result.x
             Ftot = Fch4_out + Fh2_out
             Pch4 = Fch4_out * press / Ftot
             Ph2 = press - Pch4
 
+            k_diag, Keq_diag = reaction_adsorption_constant(temp, r_constants)
+            P0 = 100000
+            driving_force = Pch4 - (Ph2 ** 2) / (Keq_diag * P0)
+            r0_diag = k_diag * driving_force
+
+            if driving_force < 0 or r0_diag < 0:
+                print(
+                    f"WARNING: Negative reaction driving force at PFR segment {i} | "
+                    f"driving_force={driving_force:.3e} Pa, r0={r0_diag:.3e} kmol/(kg_cat s)"
+                )
+
             a[i] = update_deactivation(temp, Pch4, Ph2, a_prev, r_constants, da_constants, dt, initial=(i == 0))
             a_prev = a[i]
             r = initial_reaction_rate(temp, Pch4, Ph2, r_constants) * a[i]
-            Fc_out = Fc_in + r * cat_wt * 1000 / n if i > 0 else 0
+            Fc_out = Fc_in + r * cat_wt * 1000 / n
 
             # Update inlet flows and pressure for the next segment
             Fch4_in, Fh2_in, Fc_in = Fch4_out, Fh2_out, Fc_out
@@ -454,21 +476,22 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
 
     # Mode: constant catalyst rate
     if mode_type == 'constant_rate':
-        Fch4_out, Fh2_out, Fc_out, Pch4, Ph2, average_a = simulate(mode_value, Fch4_in, Fh2_in, temp,
+        cat_rate = mode_value
+        Fch4_out, Fh2_out, Fc_out, Pch4, Ph2, average_a, tres = simulate(mode_value, Fch4_in, Fh2_in, temp,
                                                                                    press, p_drop, r_constants,
                                                                                    da_constants)
     # Mode: adjust catalyst rate to meet a target deactivation factor
     elif mode_type == 'constant_da':
         error = 1
         cat_rate = init_guess
+        max_iter = 700
+        iteration = 0
 
-        while error > 0.001:
+        while error > 0.001 and iteration < max_iter:
 
             Fch4_out, Fh2_out, Fc_out, Pch4, Ph2, average_a, tres = simulate(cat_rate, Fch4_in, Fh2_in, temp,
                                                                                        press, p_drop, r_constants,
                                                                                        da_constants)
-
-            time.sleep(0.1)
 
             # Adjust catalyst rate based on error direction
             error = abs(average_a - mode_value)
@@ -479,6 +502,11 @@ def isothermal_pfr(sim_config, Fch4_in, Fh2_in, p_drop, cat_wt, init_guess, n=50
 
             if cat_rate < 0:
                 raise Exception("Catalyst rate has reached 0")
+
+            iteration += 1
+
+        if iteration == max_iter:
+            raise RuntimeError("PFR constant_da did not converge")
 
     # Return simulation results
     return {

@@ -1,0 +1,8 @@
+numpy==2.5.3
+pandas==3.0.6
+scipy==1.18.1
+matplotlib==3.11.2
+SciencePlots==2.2.2
+pywin32==312
+ipykernel==7.4.0
+-e git+https://github.com/gabriiele12/OpenPyTEA.git@95b6a1508e0168fd9ff8ab2307481dfa126d5d45#egg=OpenPyTEA

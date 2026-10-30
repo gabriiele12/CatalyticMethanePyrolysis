@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 import win32com.client as win32
 
-from scipy.optimize import minimize
+from scipy.optimize import minimize, brentq
 
 from kinetic_models_AC import isothermal_cstr, isothermal_pfr
+
 
 
 def initialize_aspen(file_path, sim_config):
@@ -45,9 +46,9 @@ def get_temp_values(reactor_temp, reactor_type):
         (825, 65, 75, 640),
         (850, 65, 75, 725),
         (875, 65, 75, 790),
-        (900, 65, 75, 850),
-        (925, 65, 75, 905),
-        (950, 65, 75, 940)
+        (900, 65, 75, 840),
+        (925, 65, 75, 875),
+        (950, 65, 75, 905)
     ]
 
     ranges = pfr_ranges if reactor_type == 'PFR' else cstr_ranges
@@ -90,10 +91,10 @@ def reactor_size(sim_config, solid_c_wt):
 
         p_drop = ((cat_wt + solid_c_wt) * 9.8067 * 1e-5 * (4 / 3) / cross_area)
 
-        punishment1 = 1000 if actual_vol < min_vol else 1
-        punishment2 = 1000 if aspect_ratio < 2.5 else 1
+        punishment1 = 1000 if actual_vol < min_vol else 0
+        punishment2 = 1000 if aspect_ratio < 2.5 else 0
 
-        return (abs(sim_config['comp1_pressure'] - p_drop - sim_config['reactor']['pressure']) * punishment1 * punishment2)
+        return abs(sim_config['comp1_pressure'] - p_drop - sim_config['reactor']['pressure']) + punishment1 + punishment2
 
     num_units = 1
 
@@ -128,14 +129,14 @@ def initialize_simulation(sim_config):
 
     file_paths = {
         'PFR': {
-            'electric': fr'{path}\aspen_plus\AC_catalyst\pfr-electric-AC.apw',
-            'ch4': fr'{path}\aspen_plus\AC_catalyst\pfr-ch4-AC.apw',
-            'h2': fr'{path}\aspen_plus\AC_catalyst\pfr-h2-AC.apw'
+            'electric': fr'{path}\aspen_plus\AC\pfr-electric-AC.apw',
+            'ch4': fr'{path}\aspen_plus\AC\pfr-ch4-AC.apw',
+            'h2': fr'{path}\aspen_plus\AC\pfr-h2-AC.apw'
         },
         'CSTR': {
-            'electric': fr'{path}\aspen_plus\_catalyst\cstr-electric-AC.apw',
-            'ch4': fr'{path}\aspen_plus\AC_catalyst\cstr-ch4-AC.apw',
-            'h2': fr'{path}\aspen_plus\AC_catalyst\cstr-h2-AC.apw'
+            'electric': fr'{path}\aspen_plus\AC\cstr-electric-AC.apw',
+            'ch4': fr'{path}\aspen_plus\AC\cstr-ch4-AC.apw',
+            'h2': fr'{path}\aspen_plus\AC\cstr-h2-AC.apw'
         }
     }
 
@@ -270,27 +271,71 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
     cat_wt_unit = sim_config['catalyst']['weight'] / num_reacs
     cat_rate_unit = sim_config['initial_guess'] / num_reacs
 
+    reactor_type = sim_config['reactor']['type']
+    equilibrium_settings = sim_config.get('equilibrium', {})
+    equilibrium_enabled = equilibrium_settings.get('enabled', False)
+
+    aspen_conversion_tolerance = equilibrium_settings.get(
+        'aspen_conversion_tolerance',
+        equilibrium_settings.get('conversion_tolerance', 1e-3)
+    )
+    aspen_matching_factor_min = equilibrium_settings.get(
+        'aspen_matching_factor_min',
+        1e-8
+    )
+    aspen_matching_factor_max = equilibrium_settings.get(
+        'aspen_matching_factor_max',
+        5.0
+    )
+    aspen_matching_growth = equilibrium_settings.get(
+        'aspen_matching_growth',
+        1.5
+    )
+
     equilibrium_factor_guess = 1.0
+    aspen_matching_factor = 1.0
 
-    if sim_config['reactor']['type'] == 'PFR':
-        results = isothermal_pfr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
-
+    if reactor_type == 'PFR':
+        results = isothermal_pfr(
+            sim_config,
+            Fch4_unit,
+            Fh2_unit,
+            p_drop,
+            cat_wt_unit,
+            cat_rate_unit,
+            equilibrium_factor_guess=1.0
+        )
     else:
-        results = isothermal_cstr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
+        results = isothermal_cstr(
+            sim_config,
+            Fch4_unit,
+            Fh2_unit,
+            p_drop,
+            cat_wt_unit,
+            cat_rate_unit,
+            equilibrium_factor_guess=equilibrium_factor_guess
+        )
 
     deactivation = results['average_a']
     cat_rate = results['cat_rate'] * num_reacs
     tres = results['tres']
-    equilibrium_factor_guess = results.get('equilibrium_factor', 1.0)
 
-    error = 10
+    if reactor_type == 'CSTR':
+        equilibrium_factor_guess = results.get('equilibrium_factor', 1.0)
+
+    error = 10.0
+    aspen_match_error = np.inf if reactor_type == 'PFR' and equilibrium_enabled else 0.0
     iteration = 0
     max_iterations = 20
 
     Fch4_out_unit = Fch4_out / num_reacs
     Fh2_out_unit = Fh2_out / num_reacs
 
-    while error > 0.001 and iteration < max_iterations:
+
+    Fch4_total = Fch4_in
+    Fh2_total = Fh2_in
+
+    while iteration < max_iterations:
         solid_c_wt = (Mc / 3600) * tres
 
         num_reacs, reac_vol_unit, p_drop = reactor_size(sim_config, solid_c_wt)
@@ -298,11 +343,178 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
         cat_wt_unit = sim_config['catalyst']['weight'] / num_reacs
         cat_rate_unit = cat_rate / num_reacs
 
-        update_aspen(sim_config, aspen, num_reacs, reac_vol_unit, p_drop, cat_rate_unit, deactivation, equilibrium_factor_guess)
+        if reactor_type == 'PFR':
+            X_python_target = results['conversion']
 
-        run_aspen_simulation(aspen)
+            def evaluate_aspen_factor(factor):
+                update_aspen(
+                    sim_config,
+                    aspen,
+                    num_reacs,
+                    reac_vol_unit,
+                    p_drop,
+                    cat_rate_unit,
+                    deactivation,
+                    factor
+                )
 
-        Fch4, Fh2, Mc, Fch4_out, Fh2_out = get_flow_rates(aspen)
+                run_aspen_simulation(aspen)
+
+                flow_values = get_flow_rates(aspen)
+                Fch4_eval, _, _, Fch4_out_eval, _ = flow_values
+                X_aspen_eval = (
+                    Fch4_eval - Fch4_out_eval
+                ) / max(Fch4_eval, 1e-12)
+
+                return X_aspen_eval - X_python_target, X_aspen_eval, flow_values
+
+            if not equilibrium_enabled:
+                aspen_matching_factor = 1.0
+                _, X_aspen, flow_values = evaluate_aspen_factor(aspen_matching_factor)
+                aspen_match_error = 0.0
+
+            else:
+                factor_guess = float(np.clip(
+                    aspen_matching_factor,
+                    aspen_matching_factor_min,
+                    aspen_matching_factor_max
+                ))
+
+                residual_guess, X_aspen_guess, flow_values_guess = evaluate_aspen_factor(factor_guess)
+
+                best_factor = factor_guess
+                best_residual = residual_guess
+                best_X_aspen = X_aspen_guess
+                best_flow_values = flow_values_guess
+
+                if abs(residual_guess) <= aspen_conversion_tolerance:
+                    aspen_matching_factor = factor_guess
+                    X_aspen = X_aspen_guess
+                    flow_values = flow_values_guess
+
+                elif residual_guess > 0:
+                    # Aspen conversion is above the Python target: search below the current factor.
+                    factor_high = factor_guess
+                    factor_low = factor_guess
+                    bracket_found = False
+
+                    while factor_low > aspen_matching_factor_min * (1 + 1e-12):
+                        factor_low = max(
+                            factor_low / aspen_matching_growth,
+                            aspen_matching_factor_min
+                        )
+
+                        residual_low, X_aspen_low, flow_values_low = evaluate_aspen_factor(factor_low)
+
+                        if abs(residual_low) < abs(best_residual):
+                            best_factor = factor_low
+                            best_residual = residual_low
+                            best_X_aspen = X_aspen_low
+                            best_flow_values = flow_values_low
+
+                        if residual_low <= 0:
+                            bracket_found = True
+                            break
+
+                        factor_high = factor_low
+
+                    if bracket_found:
+                        def conversion_residual(factor):
+                            residual, _, _ = evaluate_aspen_factor(factor)
+                            return residual
+
+                        aspen_matching_factor = brentq(
+                            conversion_residual,
+                            factor_low,
+                            factor_guess,
+                            xtol=1e-6,
+                            rtol=1e-6,
+                            maxiter=30
+                        )
+
+                        _, X_aspen, flow_values = evaluate_aspen_factor(aspen_matching_factor)
+                    else:
+                        aspen_matching_factor = best_factor
+                        X_aspen = best_X_aspen
+                        flow_values = best_flow_values
+                        print(
+                            "Aspen PFR conversion remains above the Python target "
+                            "at the minimum allowed Aspen matching factor."
+                        )
+
+                else:
+
+                    factor_low = factor_guess
+                    factor_high = factor_guess
+                    bracket_found = False
+
+                    while factor_high < aspen_matching_factor_max * (1 - 1e-12):
+                        factor_high = min(
+                            factor_high * aspen_matching_growth,
+                            aspen_matching_factor_max
+                        )
+
+                        residual_high, X_aspen_high, flow_values_high = evaluate_aspen_factor(factor_high)
+
+                        if abs(residual_high) < abs(best_residual):
+                            best_factor = factor_high
+                            best_residual = residual_high
+                            best_X_aspen = X_aspen_high
+                            best_flow_values = flow_values_high
+
+                        if residual_high >= 0:
+                            bracket_found = True
+                            break
+
+                    if bracket_found:
+                        def conversion_residual(factor):
+                            residual, _, _ = evaluate_aspen_factor(factor)
+                            return residual
+
+                        aspen_matching_factor = brentq(
+                            conversion_residual,
+                            factor_guess,
+                            factor_high,
+                            xtol=1e-6,
+                            rtol=1e-6,
+                            maxiter=30
+                        )
+
+                        _, X_aspen, flow_values = evaluate_aspen_factor(aspen_matching_factor)
+                    else:
+                        aspen_matching_factor = best_factor
+                        X_aspen = best_X_aspen
+                        flow_values = best_flow_values
+                        print(
+                            "Aspen PFR conversion remains below the Python target "
+                            "at the maximum allowed Aspen matching factor."
+                        )
+
+                aspen_match_error = abs(X_aspen - X_python_target)
+
+            Fch4, Fh2, Mc, Fch4_out, Fh2_out = flow_values
+
+            print(
+                f"Aspen PFR match: X_python={X_python_target:.6f} | "
+                f"X_aspen={X_aspen:.6f} | "
+                f"f_aspen={aspen_matching_factor:.6f} | "
+                f"match error={aspen_match_error * 100:.6f} percentage points"
+            )
+
+        else:
+            update_aspen(
+                sim_config,
+                aspen,
+                num_reacs,
+                reac_vol_unit,
+                p_drop,
+                cat_rate_unit,
+                deactivation,
+                equilibrium_factor_guess
+            )
+
+            run_aspen_simulation(aspen)
+            Fch4, Fh2, Mc, Fch4_out, Fh2_out = get_flow_rates(aspen)
 
         Fch4_unit_new = Fch4 / num_reacs
         Fh2_unit_new = Fh2 / num_reacs
@@ -310,53 +522,120 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
         Fch4_out_unit = Fch4_out / num_reacs
         Fh2_out_unit = Fh2_out / num_reacs
 
-        error = max(abs((Fch4_unit - Fch4_unit_new) / Fch4_unit), abs((Fh2_unit - Fh2_unit_new) / Fh2_unit))
+        error = max(
+            abs((Fch4_total - Fch4) / Fch4_total),
+            abs((Fh2_total - Fh2) / Fh2_total)
+        )
 
         if sim_config['mode']['type'] == 'constant_rate':
-            print(f"Iteration {iteration}: Error = {error * 100:.4g}%, " f"Deactivation Factor = {deactivation:.4g}, " f"Equilibrium factor = {equilibrium_factor_guess:.6f}")
-
+            if reactor_type == 'PFR':
+                print(
+                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
+                    f"Deactivation Factor = {deactivation:.4g}, "
+                    f"Aspen factor = {aspen_matching_factor:.6f}"
+                )
+            else:
+                print(
+                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
+                    f"Deactivation Factor = {deactivation:.4g}, "
+                    f"Equilibrium factor = {equilibrium_factor_guess:.6f}"
+                )
         else:
-            print(f"Iteration {iteration}: Error = {error * 100:.4g}%, " f"Catalyst rate = {cat_rate:.4g}, " f"Equilibrium factor = {equilibrium_factor_guess:.6f}")
+            if reactor_type == 'PFR':
+                print(
+                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
+                    f"Catalyst rate = {cat_rate:.4g}, "
+                    f"Aspen factor = {aspen_matching_factor:.6f}"
+                )
+            else:
+                print(
+                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
+                    f"Catalyst rate = {cat_rate:.4g}, "
+                    f"Equilibrium factor = {equilibrium_factor_guess:.6f}"
+                )
 
-        print(f"Number of reactors: {num_reacs}, " f"Volume per reactor = {reac_vol_unit:.4g}, " f"Reactor pressure = {(sim_config['comp1_pressure'] - p_drop):.4g}")
+        print(
+            f"Number of reactors: {num_reacs}, "
+            f"Volume per reactor = {reac_vol_unit:.4g}, "
+            f"Reactor pressure = {(sim_config['comp1_pressure'] - p_drop):.4g}"
+        )
 
+        Fch4_total = Fch4
+        Fh2_total = Fh2
         Fch4_unit = Fch4_unit_new
         Fh2_unit = Fh2_unit_new
 
-        if error < 0.001:
+        flow_converged = error < 0.001
+        match_converged = (
+            reactor_type != 'PFR'
+            or not equilibrium_enabled
+            or aspen_match_error <= aspen_conversion_tolerance
+        )
+
+        if flow_converged and match_converged:
             break
 
         cat_rate_unit = cat_rate / num_reacs
 
-        if sim_config['reactor']['type'] == 'PFR':
-            results = isothermal_pfr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
-
+        if reactor_type == 'PFR':
+            results = isothermal_pfr(
+                sim_config,
+                Fch4_unit,
+                Fh2_unit,
+                p_drop,
+                cat_wt_unit,
+                cat_rate_unit,
+                equilibrium_factor_guess=1.0
+            )
         else:
-            results = isothermal_cstr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
+            results = isothermal_cstr(
+                sim_config,
+                Fch4_unit,
+                Fh2_unit,
+                p_drop,
+                cat_wt_unit,
+                cat_rate_unit,
+                equilibrium_factor_guess=equilibrium_factor_guess
+            )
 
         deactivation = results['average_a']
         cat_rate = results['cat_rate'] * num_reacs
         tres = results['tres']
-        equilibrium_factor_guess = results.get('equilibrium_factor', 1.0)
+
+        if reactor_type == 'CSTR':
+            equilibrium_factor_guess = results.get('equilibrium_factor', 1.0)
 
         iteration += 1
 
+    if iteration >= max_iterations:
+        print(
+            "WARNING: Aspen-Python outer loop reached the maximum number "
+            "of iterations before full convergence."
+        )
+
     cat_rate_unit = cat_rate / num_reacs
 
-    if sim_config['reactor']['type'] == 'PFR':
-        results = isothermal_pfr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
+    if reactor_type == 'CSTR':
+        results = isothermal_cstr(
+            sim_config,
+            Fch4_unit,
+            Fh2_unit,
+            p_drop,
+            cat_wt_unit,
+            cat_rate_unit,
+            equilibrium_factor_guess=equilibrium_factor_guess
+        )
 
-    else:
-        results = isothermal_cstr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
+    # Use the last Python solution consistently in the returned values.
+    deactivation = results['average_a']
+    cat_rate = results['cat_rate'] * num_reacs
+    tres = results['tres']
 
     print()
-
     print('CH4 reactor outlet rel. error: ', (Fch4_out_unit - results['Fch4_out']) * 100 / results['Fch4_out'], '%')
-
     print('H2 reactor outlet rel. error: ', (Fh2_out_unit - results['Fh2_out']) * 100 / results['Fh2_out'], '%')
 
     return deactivation, cat_rate, tres, num_reacs, reac_vol_unit, p_drop
-
 
 def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, arrays):
     run_status = find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR')

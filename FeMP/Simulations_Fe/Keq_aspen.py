@@ -35,7 +35,7 @@ def fit_kp_aspen():
     -------
     A, B, C, D
     """
-    # range continuo
+    # range temperature
     T_C = np.linspace(550, 1000, 451) #difference+1 to have 1C steps
     T_K = T_C + 273.15
 
