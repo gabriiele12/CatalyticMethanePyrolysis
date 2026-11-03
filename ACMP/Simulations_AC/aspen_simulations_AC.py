@@ -832,6 +832,10 @@ def run_scenario(sim_config):
         file_name = (f'sim-{reactor_type}-{capacity}TPD-{heat_source}-' f't{temp}-p{round(press, 3)}-c{round(catwt, 1)}-' f'da{round(deactivation, 2)}-psa{psa_press}.csv')
 
     df = pd.DataFrame({key: arrays[key] for key in result_keys})
-    df.to_csv(file_name, mode='w', index=False)
+
+    output_dir = Path(__file__).resolve().parent.parent / "Results_Simulations"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df.to_csv(output_dir / file_name, mode='w', index=False)
 
     return deactivation, cat_rate, tres

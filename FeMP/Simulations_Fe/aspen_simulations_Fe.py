@@ -641,6 +641,10 @@ def run_scenario(sim_config):
 
     # Save the results to a CSV file
     df = pd.DataFrame({key: arrays[key] for key in result_keys})
-    df.to_csv(file_name, mode='w', index=False)
+
+    output_dir = Path(__file__).resolve().parent.parent / "Results_Simulations"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    df.to_csv(output_dir / file_name, mode='w', index=False)
 
     return deactivation, cat_rate, tres
