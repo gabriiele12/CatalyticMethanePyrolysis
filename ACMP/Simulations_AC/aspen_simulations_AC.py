@@ -1,3 +1,4 @@
+
 from math import pi
 from time import sleep
 from pathlib import Path
@@ -9,7 +10,6 @@ import win32com.client as win32
 from scipy.optimize import minimize, brentq
 
 from kinetic_models_AC import isothermal_cstr, isothermal_pfr
-
 
 
 def initialize_aspen(file_path, sim_config):
@@ -152,7 +152,6 @@ def initialize_simulation(sim_config):
     assign_node(aspen, r'Flowsheeting Options\Design-Spec\CAPACITY\Input\EXPR2', sim_config['plant_capacity'])
 
     capacity_lower = (sim_config['plant_capacity'] / 100) * (20000 if heating_method == 'h2' else 15000)
-
     capacity_upper = (sim_config['plant_capacity'] / 100) * (30000 if heating_method == 'h2' else 20000)
 
     assign_node(aspen, r'Flowsheeting Options\Design-Spec\CAPACITY\Input\LOWER', capacity_lower)
@@ -208,7 +207,6 @@ def initialize_simulation(sim_config):
             rankine_flow = 12500 if reactor_type == 'PFR' else 15000
 
         assign_node(aspen, r'Blocks\RANKINE\Data\Streams\R2\Input\TOTFLOW\MIXED', sim_config['plant_capacity'] / 100 * rankine_flow)
-
         assign_node(aspen, r'Blocks\CMBST\Data\Blocks\FURNACE\Input\TEMP', reactor_temp + 20)
 
     return aspen, num_reacs, p_drop
@@ -241,11 +239,9 @@ def get_flow_rates(aspen):
 
 
 def update_aspen(sim_config, aspen, num_reacs, reac_vol_unit, p_drop, cat_rate_unit, deactivation, equilibrium_factor=1.0):
-
     A, _ = sim_config['reaction_constants']['k']
 
     assign_node(aspen, r'Reactions\Reactions\CMP\Input\PRE_EXP\1', A * deactivation * equilibrium_factor)
-
     assign_node(aspen, r'Streams\CAT-FEED\Input\TOTFLOW\CIPSD', cat_rate_unit * num_reacs)
 
     if sim_config['reactor']['type'] == 'PFR':
@@ -275,46 +271,21 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
     equilibrium_settings = sim_config.get('equilibrium', {})
     equilibrium_enabled = equilibrium_settings.get('enabled', False)
 
-    aspen_conversion_tolerance = equilibrium_settings.get(
-        'aspen_conversion_tolerance',
-        equilibrium_settings.get('conversion_tolerance', 1e-3)
-    )
-    aspen_matching_factor_min = equilibrium_settings.get(
-        'aspen_matching_factor_min',
-        1e-8
-    )
-    aspen_matching_factor_max = equilibrium_settings.get(
-        'aspen_matching_factor_max',
-        5.0
-    )
-    aspen_matching_growth = equilibrium_settings.get(
-        'aspen_matching_growth',
-        1.5
-    )
+    aspen_conversion_tolerance = equilibrium_settings.get('aspen_conversion_tolerance', equilibrium_settings.get('conversion_tolerance', 1e-3))
+
+    aspen_matching_factor_min = equilibrium_settings.get('aspen_matching_factor_min', 1e-8)
+
+    aspen_matching_factor_max = equilibrium_settings.get('aspen_matching_factor_max', 5.0)
+
+    aspen_matching_growth = equilibrium_settings.get('aspen_matching_growth', 1.5)
 
     equilibrium_factor_guess = 1.0
     aspen_matching_factor = 1.0
 
     if reactor_type == 'PFR':
-        results = isothermal_pfr(
-            sim_config,
-            Fch4_unit,
-            Fh2_unit,
-            p_drop,
-            cat_wt_unit,
-            cat_rate_unit,
-            equilibrium_factor_guess=1.0
-        )
+        results = isothermal_pfr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=1.0)
     else:
-        results = isothermal_cstr(
-            sim_config,
-            Fch4_unit,
-            Fh2_unit,
-            p_drop,
-            cat_wt_unit,
-            cat_rate_unit,
-            equilibrium_factor_guess=equilibrium_factor_guess
-        )
+        results = isothermal_cstr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
 
     deactivation = results['average_a']
     cat_rate = results['cat_rate'] * num_reacs
@@ -331,7 +302,6 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
     Fch4_out_unit = Fch4_out / num_reacs
     Fh2_out_unit = Fh2_out / num_reacs
 
-
     Fch4_total = Fch4_in
     Fh2_total = Fh2_in
 
@@ -347,40 +317,28 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
             X_python_target = results['conversion']
 
             def evaluate_aspen_factor(factor):
-                update_aspen(
-                    sim_config,
-                    aspen,
-                    num_reacs,
-                    reac_vol_unit,
-                    p_drop,
-                    cat_rate_unit,
-                    deactivation,
-                    factor
-                )
+                update_aspen(sim_config, aspen, num_reacs, reac_vol_unit, p_drop, cat_rate_unit, deactivation, factor)
 
                 run_aspen_simulation(aspen)
 
                 flow_values = get_flow_rates(aspen)
                 Fch4_eval, _, _, Fch4_out_eval, _ = flow_values
-                X_aspen_eval = (
-                    Fch4_eval - Fch4_out_eval
-                ) / max(Fch4_eval, 1e-12)
 
-                return X_aspen_eval - X_python_target, X_aspen_eval, flow_values
+                X_aspen_eval = (Fch4_eval - Fch4_out_eval) / max(Fch4_eval, 1e-12)
+
+                return (X_aspen_eval - X_python_target, X_aspen_eval, flow_values)
 
             if not equilibrium_enabled:
                 aspen_matching_factor = 1.0
+
                 _, X_aspen, flow_values = evaluate_aspen_factor(aspen_matching_factor)
+
                 aspen_match_error = 0.0
 
             else:
-                factor_guess = float(np.clip(
-                    aspen_matching_factor,
-                    aspen_matching_factor_min,
-                    aspen_matching_factor_max
-                ))
+                factor_guess = float(np.clip(aspen_matching_factor, aspen_matching_factor_min, aspen_matching_factor_max))
 
-                residual_guess, X_aspen_guess, flow_values_guess = evaluate_aspen_factor(factor_guess)
+                residual_guess, X_aspen_guess, flow_values_guess = (evaluate_aspen_factor(factor_guess))
 
                 best_factor = factor_guess
                 best_residual = residual_guess
@@ -393,18 +351,14 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
                     flow_values = flow_values_guess
 
                 elif residual_guess > 0:
-                    # Aspen conversion is above the Python target: search below the current factor.
                     factor_high = factor_guess
                     factor_low = factor_guess
                     bracket_found = False
 
                     while factor_low > aspen_matching_factor_min * (1 + 1e-12):
-                        factor_low = max(
-                            factor_low / aspen_matching_growth,
-                            aspen_matching_factor_min
-                        )
+                        factor_low = max(factor_low / aspen_matching_growth, aspen_matching_factor_min)
 
-                        residual_low, X_aspen_low, flow_values_low = evaluate_aspen_factor(factor_low)
+                        residual_low, X_aspen_low, flow_values_low = (evaluate_aspen_factor(factor_low))
 
                         if abs(residual_low) < abs(best_residual):
                             best_factor = factor_low
@@ -423,38 +377,26 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
                             residual, _, _ = evaluate_aspen_factor(factor)
                             return residual
 
-                        aspen_matching_factor = brentq(
-                            conversion_residual,
-                            factor_low,
-                            factor_guess,
-                            xtol=1e-6,
-                            rtol=1e-6,
-                            maxiter=30
-                        )
+                        aspen_matching_factor = brentq(conversion_residual, factor_low, factor_guess, xtol=1e-6, rtol=1e-6, maxiter=30)
 
                         _, X_aspen, flow_values = evaluate_aspen_factor(aspen_matching_factor)
+
                     else:
                         aspen_matching_factor = best_factor
                         X_aspen = best_X_aspen
                         flow_values = best_flow_values
-                        print(
-                            "Aspen PFR conversion remains above the Python target "
-                            "at the minimum allowed Aspen matching factor."
-                        )
+
+                        print("WARNING: Aspen PFR conversion remains above the Python target " "at the minimum allowed Aspen matching factor.")
 
                 else:
-
                     factor_low = factor_guess
                     factor_high = factor_guess
                     bracket_found = False
 
                     while factor_high < aspen_matching_factor_max * (1 - 1e-12):
-                        factor_high = min(
-                            factor_high * aspen_matching_growth,
-                            aspen_matching_factor_max
-                        )
+                        factor_high = min(factor_high * aspen_matching_growth, aspen_matching_factor_max)
 
-                        residual_high, X_aspen_high, flow_values_high = evaluate_aspen_factor(factor_high)
+                        residual_high, X_aspen_high, flow_values_high = (evaluate_aspen_factor(factor_high))
 
                         if abs(residual_high) < abs(best_residual):
                             best_factor = factor_high
@@ -471,50 +413,29 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
                             residual, _, _ = evaluate_aspen_factor(factor)
                             return residual
 
-                        aspen_matching_factor = brentq(
-                            conversion_residual,
-                            factor_guess,
-                            factor_high,
-                            xtol=1e-6,
-                            rtol=1e-6,
-                            maxiter=30
-                        )
+                        aspen_matching_factor = brentq(conversion_residual, factor_guess, factor_high, xtol=1e-6, rtol=1e-6, maxiter=30)
 
                         _, X_aspen, flow_values = evaluate_aspen_factor(aspen_matching_factor)
+
                     else:
                         aspen_matching_factor = best_factor
                         X_aspen = best_X_aspen
                         flow_values = best_flow_values
-                        print(
-                            "Aspen PFR conversion remains below the Python target "
-                            "at the maximum allowed Aspen matching factor."
-                        )
+
+                        print("WARNING: Aspen PFR conversion remains below the Python target " "at the maximum allowed Aspen matching factor.")
 
                 aspen_match_error = abs(X_aspen - X_python_target)
 
             Fch4, Fh2, Mc, Fch4_out, Fh2_out = flow_values
 
-            print(
-                f"Aspen PFR match: X_python={X_python_target:.6f} | "
-                f"X_aspen={X_aspen:.6f} | "
-                f"f_aspen={aspen_matching_factor:.6f} | "
-                f"match error={aspen_match_error * 100:.6f} percentage points"
-            )
+
 
         else:
-            update_aspen(
-                sim_config,
-                aspen,
-                num_reacs,
-                reac_vol_unit,
-                p_drop,
-                cat_rate_unit,
-                deactivation,
-                equilibrium_factor_guess
-            )
+            update_aspen(sim_config, aspen, num_reacs, reac_vol_unit, p_drop, cat_rate_unit, deactivation, equilibrium_factor_guess)
 
             run_aspen_simulation(aspen)
-            Fch4, Fh2, Mc, Fch4_out, Fh2_out = get_flow_rates(aspen)
+
+            Fch4, Fh2, Mc, Fch4_out, Fh2_out = (get_flow_rates(aspen))
 
         Fch4_unit_new = Fch4 / num_reacs
         Fh2_unit_new = Fh2 / num_reacs
@@ -522,55 +443,33 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
         Fch4_out_unit = Fch4_out / num_reacs
         Fh2_out_unit = Fh2_out / num_reacs
 
-        error = max(
-            abs((Fch4_total - Fch4) / Fch4_total),
-            abs((Fh2_total - Fh2) / Fh2_total)
-        )
+        error = max(abs((Fch4_total - Fch4) / Fch4_total), abs((Fh2_total - Fh2) / Fh2_total))
 
         if sim_config['mode']['type'] == 'constant_rate':
             if reactor_type == 'PFR':
-                print(
-                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
-                    f"Deactivation Factor = {deactivation:.4g}, "
-                    f"Aspen factor = {aspen_matching_factor:.6f}"
-                )
+                print(f"Iteration {iteration}: " f"Error = {error * 100:.4g}%, " f"Deactivation Factor = {deactivation:.4g} ")
+
             else:
-                print(
-                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
-                    f"Deactivation Factor = {deactivation:.4g}, "
-                    f"Equilibrium factor = {equilibrium_factor_guess:.6f}"
-                )
+                print(f"Iteration {iteration}: " f"Error = {error * 100:.4g}%, " f"Deactivation Factor = {deactivation:.4g} ")
+
         else:
             if reactor_type == 'PFR':
-                print(
-                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
-                    f"Catalyst rate = {cat_rate:.4g}, "
-                    f"Aspen factor = {aspen_matching_factor:.6f}"
-                )
-            else:
-                print(
-                    f"Iteration {iteration}: Error = {error * 100:.4g}%, "
-                    f"Catalyst rate = {cat_rate:.4g}, "
-                    f"Equilibrium factor = {equilibrium_factor_guess:.6f}"
-                )
+                print(f"Iteration {iteration}: " f"Error = {error * 100:.4g}%, " f"Catalyst rate = {cat_rate:.4g} ")
 
-        print(
-            f"Number of reactors: {num_reacs}, "
-            f"Volume per reactor = {reac_vol_unit:.4g}, "
-            f"Reactor pressure = {(sim_config['comp1_pressure'] - p_drop):.4g}"
-        )
+            else:
+                print(f"Iteration {iteration}: " f"Error = {error * 100:.4g}%, " f"Catalyst rate = {cat_rate:.4g} ")
+
+        print(f"Number of reactors: {num_reacs}, " f"Volume per reactor = {reac_vol_unit:.4g}, " f"Reactor pressure = " f"{(sim_config['comp1_pressure'] - p_drop):.4g}")
 
         Fch4_total = Fch4
         Fh2_total = Fh2
+
         Fch4_unit = Fch4_unit_new
         Fh2_unit = Fh2_unit_new
 
         flow_converged = error < 0.001
-        match_converged = (
-            reactor_type != 'PFR'
-            or not equilibrium_enabled
-            or aspen_match_error <= aspen_conversion_tolerance
-        )
+
+        match_converged = (reactor_type != 'PFR' or not equilibrium_enabled or aspen_match_error <= aspen_conversion_tolerance)
 
         if flow_converged and match_converged:
             break
@@ -578,25 +477,10 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
         cat_rate_unit = cat_rate / num_reacs
 
         if reactor_type == 'PFR':
-            results = isothermal_pfr(
-                sim_config,
-                Fch4_unit,
-                Fh2_unit,
-                p_drop,
-                cat_wt_unit,
-                cat_rate_unit,
-                equilibrium_factor_guess=1.0
-            )
+            results = isothermal_pfr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=1.0)
+
         else:
-            results = isothermal_cstr(
-                sim_config,
-                Fch4_unit,
-                Fh2_unit,
-                p_drop,
-                cat_wt_unit,
-                cat_rate_unit,
-                equilibrium_factor_guess=equilibrium_factor_guess
-            )
+            results = isothermal_cstr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
 
         deactivation = results['average_a']
         cat_rate = results['cat_rate'] * num_reacs
@@ -608,34 +492,25 @@ def run_reactor(aspen, sim_config, num_reacs, p_drop):
         iteration += 1
 
     if iteration >= max_iterations:
-        print(
-            "WARNING: Aspen-Python outer loop reached the maximum number "
-            "of iterations before full convergence."
-        )
+        print("WARNING: Aspen-Python outer loop reached the maximum number " "of iterations before full convergence.")
 
     cat_rate_unit = cat_rate / num_reacs
 
     if reactor_type == 'CSTR':
-        results = isothermal_cstr(
-            sim_config,
-            Fch4_unit,
-            Fh2_unit,
-            p_drop,
-            cat_wt_unit,
-            cat_rate_unit,
-            equilibrium_factor_guess=equilibrium_factor_guess
-        )
+        results = isothermal_cstr(sim_config, Fch4_unit, Fh2_unit, p_drop, cat_wt_unit, cat_rate_unit, equilibrium_factor_guess=equilibrium_factor_guess)
 
-    # Use the last Python solution consistently in the returned values.
     deactivation = results['average_a']
     cat_rate = results['cat_rate'] * num_reacs
     tres = results['tres']
 
     print()
+
     print('CH4 reactor outlet rel. error: ', (Fch4_out_unit - results['Fch4_out']) * 100 / results['Fch4_out'], '%')
+
     print('H2 reactor outlet rel. error: ', (Fh2_out_unit - results['Fh2_out']) * 100 / results['Fh2_out'], '%')
 
-    return deactivation, cat_rate, tres, num_reacs, reac_vol_unit, p_drop
+    return (deactivation, cat_rate, tres, num_reacs, reac_vol_unit, p_drop)
+
 
 def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, arrays):
     run_status = find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR')
@@ -647,11 +522,8 @@ def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, 
         arrays['H2 Prod [kg/h]'][0] = find_node(aspen, r'Streams\H2-PROD\Output\MASSFLMX_GAS')
         arrays['C Prod [kg/h]'][0] = find_node(aspen, r'Streams\SOLID-C\Output\MASSFLOW\CIPSD\C')
         arrays['CH4 Recycle [kg/h]'][0] = find_node(aspen, r'Streams\PS15\Output\MASSFLMX_GAS')
-
         arrays['CH4 Reactor Feed [kmol/h]'][0] = find_node(aspen, r'Streams\PS6\Output\MOLEFLOW\MIXED\CH4')
-
         arrays['CH4 Reactor Outlet [kmol/h]'][0] = find_node(aspen, r'Streams\PS7\Output\MOLEFLOW\MIXED\CH4')
-
         arrays['Cat Rate [kg/h]'][0] = find_node(aspen, r'Streams\CAT-FEED\Output\MASSFLMX\CIPSD')
 
         arrays['Cat Res. Time [s]'][0] = tres
@@ -661,7 +533,6 @@ def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, 
 
         arrays['Comp-1 Power [kW]'][0] = find_node(aspen, r'Blocks\COMP-1\Output\WNET')
         arrays['Comp-2 Power [kW]'][0] = find_node(aspen, r'Blocks\COMP-2\Output\WNET')
-
         arrays['HeatX-1 Area [m2]'][0] = find_node(aspen, r'Blocks\HX-1\Output\HX_AREAP')
 
         arrays['Cooler-1 Area [m2]'][0] = find_node(aspen, r'Blocks\COOLER-1\Output\HX_AREAP')
@@ -675,7 +546,6 @@ def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, 
         arrays['Reactor Duty [MW]'][0] = find_node(aspen, r'Blocks\REACTOR\Output\QCALC') / 1000
 
         arrays['Cyclone Volumetric [m3/s]'][0] = find_node(aspen, r'Streams\PS7\Output\VOLFLMX2')
-
         arrays['PSA Mole Feed [kmol/hr]'][0] = find_node(aspen, r'Blocks\PSA\Output\BAL_MOLI_TFL')
 
         arrays['Error Status'][0] = run_status
@@ -686,28 +556,26 @@ def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, 
             arrays['Comp-3 Vol. Flow [m3/h]'][0] = (find_node(aspen, r'Blocks\CMBST\Data\Blocks\COMP-3\Output\VFLOW') * 3600)
 
             arrays['Fuel Feed [kg/h]'][0] = find_node(aspen, r'Streams\FUELFEED\Output\MASSFLMX_GAS')
-
             arrays['CO2 Emission [kg/h]'][0] = find_node(aspen, r'Streams\FLUEGAS\Output\MASSFLOW\MIXED\CO2')
-
             arrays['Cool Water 3 [kJ/s]'][0] = find_node(aspen, r'Blocks\RANKINE\Data\Blocks\COOLER-3\Output\HX_DUTY')
-
             arrays['HeatX-2 Area [m2]'][0] = find_node(aspen, r'Blocks\HEATX-2\Data\Blocks\HX-2\Output\HX_AREAP')
-
             arrays['HeatX-3 Area [m2]'][0] = find_node(aspen, r'Blocks\HEATX-3\Data\Blocks\HX-3\Output\HX_AREAP')
-
             arrays['Cooler-3 Area [m2]'][0] = find_node(aspen, r'Blocks\RANKINE\Data\Blocks\COOLER-3\Output\HX_AREAP')
-
             arrays['Turb-1 Power [kW]'][0] = find_node(aspen, r'Blocks\RANKINE\Data\Blocks\TURB-1\Output\WNET')
 
             arrays['Pump Flow [L/s]'][0] = (find_node(aspen, r'Blocks\RANKINE\Data\Blocks\PUMP\Output\VFLOW') * 1000)
 
-            cw_tot = (find_node(aspen, r'Blocks\COOLER-1\Output\HX_DUTY') + find_node(aspen, r'Blocks\COOLER-2\Output\HX_DUTY') - find_node(aspen, r'Blocks\COMP-2\Output\DUTY_OUT') + find_node(aspen, r'Blocks\RANKINE\Data\Blocks\COOLER-3\Output\HX_DUTY'))
+            cw_tot = (
+                find_node(aspen, r'Blocks\COOLER-1\Output\HX_DUTY')
+                + find_node(aspen, r'Blocks\COOLER-2\Output\HX_DUTY')
+                - find_node(aspen, r'Blocks\COMP-2\Output\DUTY_OUT')
+                + find_node(aspen, r'Blocks\RANKINE\Data\Blocks\COOLER-3\Output\HX_DUTY')
+            )
 
             if sim_config['reactor']['heating'] == 'ch4':
                 arrays['Comp-4 Power [kW]'][0] = find_node(aspen, r'Blocks\COMP-4\Output\WNET')
                 arrays['Cool Water 4 [kJ/s]'][0] = find_node(aspen, r'Blocks\COOLER-4\Output\HX_DUTY')
                 arrays['Cooler-4 Area [m2]'][0] = find_node(aspen, r'Blocks\COOLER-4\Output\HX_AREAP')
-
                 arrays['CO2 with CCS [kg/h]'][0] = find_node(aspen, r'Streams\CLEANGAS\Output\MASSFLOW\MIXED\CO2')
 
                 cw_tot += (find_node(aspen, r'Blocks\COOLER-4\Output\HX_DUTY') - find_node(aspen, r'Blocks\COMP-4\Output\DUTY_OUT'))
@@ -734,20 +602,33 @@ def collect_results(sim_config, aspen, deactivation, tres, num_reacs, reac_vol, 
 
             arrays['HeatX-2 Area [m2]'][0] = 0
             arrays['HeatX-3 Area [m2]'][0] = 0
+
             arrays['Cooler-3 Area [m2]'][0] = 0
             arrays['Cooler-4 Area [m2]'][0] = 0
 
             arrays['Turb-1 Power [kW]'][0] = 0
             arrays['Pump Flow [L/s]'][0] = 0
 
-            arrays['Cool Water Total [kJ/s]'][0] = (find_node(aspen, r'Blocks\COOLER-1\Output\HX_DUTY') + find_node(aspen, r'Blocks\COOLER-2\Output\HX_DUTY') - find_node(aspen, r'Blocks\COMP-2\Output\DUTY_OUT'))
+            arrays['Cool Water Total [kJ/s]'][0] = (
+                find_node(aspen, r'Blocks\COOLER-1\Output\HX_DUTY')
+                + find_node(aspen, r'Blocks\COOLER-2\Output\HX_DUTY')
+                - find_node(aspen, r'Blocks\COMP-2\Output\DUTY_OUT')
+            )
 
     else:
         for key in arrays:
             if key == 'Error Status':
                 arrays[key][0] = run_status
 
-                error_message = str(find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\1') + " " + find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\2') + " " + find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\3') + " " + find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\4'))
+                error_message = str(
+                    find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\1')
+                    + " "
+                    + find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\2')
+                    + " "
+                    + find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\3')
+                    + " "
+                    + find_node(aspen, r'Results Summary\Run-Status\Output\PER_ERROR\4')
+                )
 
             else:
                 arrays[key][0] = float('inf')
@@ -760,7 +641,7 @@ def run_scenario(sim_config):
 
     run_aspen_simulation(aspen)
 
-    deactivation, cat_rate, tres, num_reacs, reac_vol_unit, p_drop = run_reactor(aspen, sim_config, num_reacs, p_drop)
+    deactivation, cat_rate, tres, num_reacs, reac_vol_unit, p_drop = (run_reactor(aspen, sim_config, num_reacs, p_drop))
 
     result_keys = [
         'CH4 Feed [kg/h]',
@@ -813,9 +694,9 @@ def run_scenario(sim_config):
 
     sleep(1.5)
 
-    if run_status == 0:
-        aspen.Reinit()
-        aspen.Application.Quit()
+    #if run_status == 0:
+        #aspen.Reinit()
+        #aspen.Application.Quit()
 
     reactor_type = sim_config['reactor']['type']
     capacity = sim_config['plant_capacity']
@@ -832,10 +713,6 @@ def run_scenario(sim_config):
         file_name = (f'sim-{reactor_type}-{capacity}TPD-{heat_source}-' f't{temp}-p{round(press, 3)}-c{round(catwt, 1)}-' f'da{round(deactivation, 2)}-psa{psa_press}.csv')
 
     df = pd.DataFrame({key: arrays[key] for key in result_keys})
-
-    output_dir = Path(__file__).resolve().parent.parent / "Results_Simulations"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    df.to_csv(output_dir / file_name, mode='w', index=False)
+    df.to_csv(file_name, mode='w', index=False)
 
     return deactivation, cat_rate, tres
