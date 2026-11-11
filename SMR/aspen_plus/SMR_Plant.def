@@ -1,0 +1,10 @@
+INPUT: SMR_Plant.inm
+MODNAME: apmain
+RUNID: SMR_Plant
+NEW_RUNID: SMR_Plant
+OLD_RUNID: SMR_Plant
+PDF: SMR_Plant.appdf
+USERNAME: patru
+XMOD: C:\Program Files\AspenTech\Aspen Plus V14.0\Engine\xeq\apmain
+SPONLY:
+DBCONN: _3527vuh.ads
