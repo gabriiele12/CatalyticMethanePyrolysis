@@ -83,26 +83,6 @@ and contains the stream flows, catalyst rate and residence time, reactor size an
 
 The Monte Carlo results (`LCOH_MonteCarlo.json`) are not included. Each file is 130–200 MB, and GitHub rejects files over 100 MB. To regenerate them, uncomment the Monte Carlo cells at the end of `tea/CH4_CCS.ipynb`. These runs are slow.
 
-## Where each figure's data comes from
-
-The repository has no plotting scripts. This table shows which results each figure in the study is based on.
-
-| Figure | Content | Data |
-|--------|---------|------|
-| 3 | Baseline comparison of the three catalysts | `catalysts/*/results/tea/*_avg.json` |
-| 4 | Catalyst circulation rate | `catalysts/*/results/simulations/` (base cases, `Cat Rate [kg/h]`) |
-| 5 | LCOH vs. reactor temperature | `catalysts/*/results/tea/LCOH_temperature.json` |
-| 6 | Monte Carlo LCOH distributions | `LCOH_MonteCarlo.json` (regenerate, see above) |
-| 7 | [TODO] | [TODO] |
-| 8 | LCOH and CO₂ emissions per heating strategy | `catalysts/*/results/tea/LCOH_heatings.json`, `CO2_results.json` |
-| S1 | AC kinetic parameter fit | parameters in `catalysts/ac/simulation/run_simulations.ipynb` |
-| S2 | [TODO] | [TODO] |
-| S3–S5 | LCOH, CSTR vs. PFR (Ni, Fe, AC) | `catalysts/{ni,fe,ac}/tea/CH4_CCS.ipynb` |
-| S6–S8 | Cost breakdown (Ni, Fe, AC) | `catalysts/{ni,fe,ac}/results/tea/*_avg.json` |
-| S9, S10 | Fixed capital investment, fixed OPEX | `catalysts/*/results/tea/Fixed_capital_avg.json`, `Fixed_opex_avg.json` |
-| S11–S13 | Temperature sensitivity (Ni, Fe, AC) | `catalysts/{ni,fe,ac}/results/tea/LCOH_temperature.json` and the temperature-sweep CSVs |
-| S14–S16 | Tornado sensitivity (Ni, Fe, AC) | computed in `catalysts/{ni,fe,ac}/tea/CH4_CCS.ipynb` |
-
 ## Installation
 
 Python ≥ 3.12 is required (developed with Python 3.14).
