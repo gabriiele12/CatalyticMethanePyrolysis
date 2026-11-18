@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "catalytic-methane-pyrolysis"
+version = "1.0.0"
+description = "Aspen Plus process simulations, CSTR/PFR reactor models and OpenPyTEA techno-economic assessment of catalytic methane pyrolysis over Ni, Fe and activated-carbon catalysts."
+readme = "README.md"
+license = "MIT AND CC-BY-4.0"
+license-files = ["LICENSE", "LICENSE-DATA"]
+authors = [
+    { name = "Gabriele Patruno" },
+    { name = "Panji B. Tamarona" },
+    { name = "Thijs J. H. Vlugt" },
+    { name = "Mahinder Ramdin" },
+]
+requires-python = ">=3.12"
+keywords = [
+    "methane pyrolysis",
+    "hydrogen",
+    "techno-economic assessment",
+    "Aspen Plus",
+    "reactor modelling",
+    "OpenPyTEA",
+]
+dependencies = [
+    "numpy>=2.0",
+    "pandas>=2.2",
+    "scipy>=1.13",
+    "matplotlib>=3.9",
+    "SciencePlots>=2.1",
+    "ipykernel>=6.29",
+    # Aspen Plus COM automation (simulations only, Windows only)
+    "pywin32>=306; sys_platform == 'win32'",
+    # Techno-economic assessment, pinned to the commit used for the study
+    "OpenPyTEA @ git+https://github.com/gabriiele12/OpenPyTEA.git@95b6a1508e0168fd9ff8ab2307481dfa126d5d45",
+]
+
+[project.urls]
+Repository = "https://github.com/pbtamarona/CatalyticMethanePyrolysis"
+OpenPyTEA = "https://github.com/pbtamarona/OpenPyTEA"
+
+# This repository is a collection of scripts and notebooks, not an importable
+# package: `pip install .` only installs the dependencies listed above.
+[tool.setuptools]
+packages = []
